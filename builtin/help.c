@@ -8,6 +8,7 @@
 #include "parse-options.h"
 #include "run-command.h"
 #include "column.h"
+#include "config-list.h"
 #include "help.h"
 #include "alias.h"
 
@@ -61,6 +62,91 @@ static const char * const builtin_help_usage[] = {
 	N_("git help [--all] [--guides] [--man | --web | --info] [<command>]"),
 	NULL
 };
+
+struct slot_expansion {
+	const char *prefix;
+	const char *placeholder;
+	void (*fn)(struct string_list *list, const char *prefix);
+	int found;
+};
+
+static void list_config_help(int for_human)
+{
+	struct slot_expansion slot_expansions[] = {
+		{ "advice", "*", list_config_advices },
+		{ "color.branch", "<slot>", list_config_color_branch_slots },
+		{ "color.decorate", "<slot>", list_config_color_decorate_slots },
+		{ "color.diff", "<slot>", list_config_color_diff_slots },
+		{ "color.grep", "<slot>", list_config_color_grep_slots },
+		{ "color.interactive", "<slot>", list_config_color_interactive_slots },
+		{ "color.remote", "<slot>", list_config_color_sideband_slots },
+		{ "color.status", "<slot>", list_config_color_status_slots },
+		{ "fsck", "<msg-id>", list_config_fsck_msg_ids },
+		{ "receive.fsck", "<msg-id>", list_config_fsck_msg_ids },
+		{ NULL, NULL, NULL }
+	};
+	const char **p;
+	struct slot_expansion *e;
+	struct string_list keys = STRING_LIST_INIT_DUP;
+	int i;
+
+	for (p = config_name_list; *p; p++) {
+		const char *var = *p;
+		struct strbuf sb = STRBUF_INIT;
+
+		for (e = slot_expansions; e->prefix; e++) {
+
+			strbuf_reset(&sb);
+			strbuf_addf(&sb, "%s.%s", e->prefix, e->placeholder);
+			if (!strcasecmp(var, sb.buf)) {
+				e->fn(&keys, e->prefix);
+				e->found++;
+				break;
+			}
+		}
+		strbuf_release(&sb);
+		if (!e->prefix)
+			string_list_append(&keys, var);
+	}
+
+	for (e = slot_expansions; e->prefix; e++)
+		if (!e->found)
+			BUG("slot_expansion %s.%s is not used",
+			    e->prefix, e->placeholder);
+
+	string_list_sort(&keys);
+	for (i = 0; i < keys.nr; i++) {
+		const char *var = keys.items[i].string;
+		const char *wildcard, *tag, *cut;
+
+		if (for_human) {
+			puts(var);
+			continue;
+		}
+
+		wildcard = strchr(var, '*');
+		tag = strchr(var, '<');
+
+		if (!wildcard && !tag) {
+			puts(var);
+			continue;
+		}
+
+		if (wildcard && !tag)
+			cut = wildcard;
+		else if (!wildcard && tag)
+			cut = tag;
+		else
+			cut = wildcard < tag ? wildcard : tag;
+
+		/*
+		 * We may produce duplicates, but that's up to
+		 * git-completion.bash to handle
+		 */
+		printf("%.*s\n", (int)(cut - var), var);
+	}
+	string_list_clear(&keys, 0);
+}
 
 static enum help_format parse_help_format(const char *format)
 {
@@ -242,7 +328,7 @@ static int add_man_viewer_cmd(const char *name,
 static int add_man_viewer_info(const char *var, const char *value)
 {
 	const char *name, *subkey;
-	int namelen;
+	size_t namelen;
 
 	if (parse_config_key(var, "man", &name, &namelen, &subkey) < 0 || !name)
 		return 0;
@@ -350,10 +436,9 @@ static void exec_viewer(const char *name, const char *page)
 		warning(_("'%s': unknown man viewer."), name);
 }
 
-static void show_man_page(const char *git_cmd)
+static void show_man_page(const char *page)
 {
 	struct man_viewer_list *viewer;
-	const char *page = cmd_to_page(git_cmd);
 	const char *fallback = getenv("GIT_MAN_VIEWER");
 
 	setup_man_path();
@@ -367,9 +452,8 @@ static void show_man_page(const char *git_cmd)
 	die(_("no man viewer handled the request"));
 }
 
-static void show_info_page(const char *git_cmd)
+static void show_info_page(const char *page)
 {
-	const char *page = cmd_to_page(git_cmd);
 	setenv("INFOPATH", system_path(GIT_INFO_PATH), 1);
 	execlp("info", "info", "gitman", page, (char *)NULL);
 	die(_("no info viewer handled the request"));
@@ -400,9 +484,8 @@ static void open_html(const char *path)
 	execl_git_cmd("web--browse", "-c", "help.browser", path, (char *)NULL);
 }
 
-static void show_html_page(const char *git_cmd)
+static void show_html_page(const char *page)
 {
-	const char *page = cmd_to_page(git_cmd);
 	struct strbuf page_path; /* it leaks but we exec bellow */
 
 	get_html_page_path(&page_path, page);
@@ -462,6 +545,7 @@ int cmd_help(int argc, const char **argv, const char *prefix)
 {
 	int nongit;
 	enum help_format parsed_help_format;
+	const char *page;
 
 	argc = parse_options(argc, argv, prefix, builtin_help_options,
 			builtin_help_usage, 0);
@@ -493,7 +577,7 @@ int cmd_help(int argc, const char **argv, const char *prefix)
 	}
 
 	if (show_guides)
-		list_common_guides_help();
+		list_guides_help();
 
 	if (show_all || show_guides) {
 		printf("%s\n", _(git_more_info_string));
@@ -520,16 +604,17 @@ int cmd_help(int argc, const char **argv, const char *prefix)
 
 	argv[0] = check_git_cmd(argv[0]);
 
+	page = cmd_to_page(argv[0]);
 	switch (help_format) {
 	case HELP_FORMAT_NONE:
 	case HELP_FORMAT_MAN:
-		show_man_page(argv[0]);
+		show_man_page(page);
 		break;
 	case HELP_FORMAT_INFO:
-		show_info_page(argv[0]);
+		show_info_page(page);
 		break;
 	case HELP_FORMAT_WEB:
-		show_html_page(argv[0]);
+		show_html_page(page);
 		break;
 	}
 

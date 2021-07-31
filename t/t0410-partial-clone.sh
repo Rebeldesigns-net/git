@@ -30,6 +30,40 @@ test_expect_success 'extensions.partialclone without filter' '
 	git -C client fetch origin
 '
 
+test_expect_success 'convert shallow clone to partial clone' '
+	rm -fr server client &&
+	test_create_repo server &&
+	test_commit -C server my_commit 1 &&
+	test_commit -C server my_commit2 1 &&
+	git clone --depth=1 "file://$(pwd)/server" client &&
+	git -C client fetch --unshallow --filter="blob:none" &&
+	test_cmp_config -C client true remote.origin.promisor &&
+	test_cmp_config -C client blob:none remote.origin.partialclonefilter &&
+	test_cmp_config -C client 1 core.repositoryformatversion
+'
+
+test_expect_success SHA1 'convert to partial clone with noop extension' '
+	rm -fr server client &&
+	test_create_repo server &&
+	test_commit -C server my_commit 1 &&
+	test_commit -C server my_commit2 1 &&
+	git clone --depth=1 "file://$(pwd)/server" client &&
+	test_cmp_config -C client 0 core.repositoryformatversion &&
+	git -C client config extensions.noop true &&
+	git -C client fetch --unshallow --filter="blob:none"
+'
+
+test_expect_success SHA1 'converting to partial clone fails with unrecognized extension' '
+	rm -fr server client &&
+	test_create_repo server &&
+	test_commit -C server my_commit 1 &&
+	test_commit -C server my_commit2 1 &&
+	git clone --depth=1 "file://$(pwd)/server" client &&
+	test_cmp_config -C client 0 core.repositoryformatversion &&
+	git -C client config extensions.nonsense true &&
+	test_must_fail git -C client fetch --unshallow --filter="blob:none"
+'
+
 test_expect_success 'missing reflog object, but promised by a commit, passes fsck' '
 	rm -rf repo &&
 	test_create_repo repo &&
@@ -149,7 +183,7 @@ test_expect_success 'missing CLI object, but promised, passes fsck' '
 '
 
 test_expect_success 'fetching of missing objects' '
-	rm -rf repo &&
+	rm -rf repo err &&
 	test_create_repo server &&
 	test_commit -C server foo &&
 	git -C server repack -a -d --write-bitmap-index &&
@@ -160,7 +194,10 @@ test_expect_success 'fetching of missing objects' '
 
 	git -C repo config core.repositoryformatversion 1 &&
 	git -C repo config extensions.partialclone "origin" &&
-	git -C repo cat-file -p "$HASH" &&
+	git -C repo cat-file -p "$HASH" 2>err &&
+
+	# Ensure that no spurious FETCH_HEAD messages are written
+	! grep FETCH_HEAD err &&
 
 	# Ensure that the .promisor file is written, and check that its
 	# associated packfile contains the object
@@ -180,7 +217,7 @@ test_expect_success 'fetching of missing objects works with ref-in-want enabled'
 	rm -rf repo/.git/objects/* &&
 	rm -f trace &&
 	GIT_TRACE_PACKET="$(pwd)/trace" git -C repo cat-file -p "$HASH" &&
-	grep "git< fetch=.*ref-in-want" trace
+	grep "fetch< fetch=.*ref-in-want" trace
 '
 
 test_expect_success 'fetching of missing objects from another promisor remote' '
@@ -565,6 +602,29 @@ test_expect_success 'do not fetch when checking existence of tree we construct o
 	git -C repo config extensions.partialclone "arbitrary string" &&
 
 	git -C repo cherry-pick side1
+'
+
+test_expect_success 'lazy-fetch when accessing object not in the_repository' '
+	rm -rf full partial.git &&
+	test_create_repo full &&
+	test_commit -C full create-a-file file.txt &&
+
+	test_config -C full uploadpack.allowfilter 1 &&
+	test_config -C full uploadpack.allowanysha1inwant 1 &&
+	git clone --filter=blob:none --bare "file://$(pwd)/full" partial.git &&
+	FILE_HASH=$(git -C full rev-parse HEAD:file.txt) &&
+
+	# Sanity check that the file is missing
+	git -C partial.git rev-list --objects --missing=print HEAD >out &&
+	grep "[?]$FILE_HASH" out &&
+
+	git -C full cat-file -s "$FILE_HASH" >expect &&
+	test-tool partial-clone object-info partial.git "$FILE_HASH" >actual &&
+	test_cmp expect actual &&
+
+	# Sanity check that the file is now present
+	git -C partial.git rev-list --objects --missing=print HEAD >out &&
+	! grep "[?]$FILE_HASH" out
 '
 
 . "$TEST_DIRECTORY"/lib-httpd.sh

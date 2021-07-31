@@ -10,6 +10,7 @@ struct lock_file;
 struct pathspec;
 struct raw_object_store;
 struct submodule_cache;
+struct promisor_remote_config;
 
 enum untracked_cache_setting {
 	UNTRACKED_CACHE_UNSET = -1,
@@ -23,12 +24,14 @@ enum fetch_negotiation_setting {
 	FETCH_NEGOTIATION_NONE = 0,
 	FETCH_NEGOTIATION_DEFAULT = 1,
 	FETCH_NEGOTIATION_SKIPPING = 2,
+	FETCH_NEGOTIATION_NOOP = 3,
 };
 
 struct repo_settings {
 	int initialized;
 
 	int core_commit_graph;
+	int commit_graph_read_changed_paths;
 	int gc_write_commit_graph;
 	int fetch_write_commit_graph;
 
@@ -37,6 +40,11 @@ struct repo_settings {
 
 	int pack_use_sparse;
 	enum fetch_negotiation_setting fetch_negotiation_algorithm;
+
+	int core_multi_pack_index;
+
+	unsigned command_requires_full_index:1,
+		 sparse_index:1;
 };
 
 struct repository {
@@ -67,8 +75,12 @@ struct repository {
 	 */
 	struct parsed_object_pool *parsed_objects;
 
-	/* The store in which the refs are held. */
-	struct ref_store *refs;
+	/*
+	 * The store in which the refs are held. This should generally only be
+	 * accessed via get_main_ref_store(), as that will lazily initialize
+	 * the ref object.
+	 */
+	struct ref_store *refs_private;
 
 	/*
 	 * Contains path to often used file names.
@@ -127,6 +139,10 @@ struct repository {
 
 	/* True if commit-graph has been disabled within this process. */
 	int commit_graph_disabled;
+
+	/* Configurations related to promisor remotes. */
+	char *repository_format_partial_clone;
+	struct promisor_remote_config *promisor_remote_config;
 
 	/* Configurations */
 
@@ -191,5 +207,11 @@ int repo_read_index_unmerged(struct repository *);
 void repo_update_index_if_able(struct repository *, struct lock_file *);
 
 void prepare_repo_settings(struct repository *r);
+
+/*
+ * Return 1 if upgrade repository format to target_version succeeded,
+ * 0 if no upgrade is necessary, and -1 when upgrade is not possible.
+ */
+int upgrade_repository_format(int target_version);
 
 #endif /* REPOSITORY_H */
